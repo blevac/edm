@@ -201,7 +201,7 @@ class PositionalEmbedding(torch.nn.Module):
         freqs = torch.arange(start=0, end=self.num_channels//2, dtype=torch.float32, device=x.device)
         freqs = freqs / (self.num_channels // 2 - (1 if self.endpoint else 0))
         freqs = (1 / self.max_positions) ** freqs
-        x = x.ger(freqs.to(x.dtype))
+        x = x.ger(freqs.to(x.dtype)) #NOTE ger is equivalent to outer product
         x = torch.cat([x.cos(), x.sin()], dim=1)
         return x
 
@@ -235,12 +235,12 @@ class SongUNet(torch.nn.Module):
         augment_dim         = 0,            # Augmentation label dimensionality, 0 = no augmentation.
 
         model_channels      = 128,          # Base multiplier for the number of channels.
-        channel_mult        = [1,2,2,2],    # Per-resolution multipliers for the number of channels.
+        channel_mult        = [1,1,2,2,2,2,2],    # Per-resolution multipliers for the number of channels. NOTE changed-> FFHQ Song config
         channel_mult_emb    = 4,            # Multiplier for the dimensionality of the embedding vector.
-        num_blocks          = 4,            # Number of residual blocks per resolution.
-        attn_resolutions    = [16],         # List of resolutions with self-attention.
-        dropout             = 0.10,         # Dropout probability of intermediate activations.
-        label_dropout       = 0,            # Dropout probability of class labels for classifier-free guidance.
+        num_blocks          = 2,            # Number of residual blocks per resolution. #NOTE 4->2
+        attn_resolutions    = [12],         # List of resolutions with self-attention. NOTE [16]->[12]
+        dropout             = 0.0,          # Dropout probability of intermediate activations. NOTE 0.1->0.0
+        label_dropout       = 0.1,            # Dropout probability of class labels for classifier-free guidance. #NOTE 0->0.1
 
         embedding_type      = 'positional', # Timestep embedding type: 'positional' for DDPM++, 'fourier' for NCSN++.
         channel_mult_noise  = 1,            # Timestep embedding size: 1 for DDPM++, 2 for NCSN++.
@@ -368,6 +368,7 @@ class SongUNet(torch.nn.Module):
 # original implementation by Dhariwal and Nichol, available at
 # https://github.com/openai/guided-diffusion
 
+#NOTE changing the default params to match the ImageNet 256 from the paper
 @persistence.persistent_class
 class DhariwalUNet(torch.nn.Module):
     def __init__(self,
@@ -377,13 +378,13 @@ class DhariwalUNet(torch.nn.Module):
         label_dim           = 0,            # Number of class labels, 0 = unconditional.
         augment_dim         = 0,            # Augmentation label dimensionality, 0 = no augmentation.
 
-        model_channels      = 192,          # Base multiplier for the number of channels.
-        channel_mult        = [1,2,3,4],    # Per-resolution multipliers for the number of channels.
+        model_channels      = 128,          # Base multiplier for the number of channels. NOTE decreased from 192->128
+        channel_mult        = [1,1,2,2,4,4],    # Per-resolution multipliers for the number of channels. NOTE updated from 4->6
         channel_mult_emb    = 4,            # Multiplier for the dimensionality of the embedding vector.
-        num_blocks          = 3,            # Number of residual blocks per resolution.
-        attn_resolutions    = [32,16,8],    # List of resolutions with self-attention.
-        dropout             = 0.10,         # List of resolutions with self-attention.
-        label_dropout       = 0,            # Dropout probability of class labels for classifier-free guidance.
+        num_blocks          = 2,            # Number of residual blocks per resolution. #NOTE decreased 3->2
+        attn_resolutions    = [24,12],    # List of resolutions with self-attention. #NOTE changed [32,16,8]->[24,12]
+        dropout             = 0.0,          # Probability of feature dropout #NOTE 0.1->0.0
+        label_dropout       = 0.1,          # Dropout probability of class labels for classifier-free guidance. NOTE increased 0.0->0.1
     ):
         super().__init__()
         self.label_dropout = label_dropout
@@ -400,10 +401,12 @@ class DhariwalUNet(torch.nn.Module):
         self.map_label = Linear(in_features=label_dim, out_features=emb_channels, bias=False, init_mode='kaiming_normal', init_weight=np.sqrt(label_dim)) if label_dim else None
 
         # Encoder.
+        #NOTE consists of a downsampling (or conv2d if input dim) ResBlock followed by num_blocks ResBlocks
+        #   downsampling (or conv2d) blocks have no attention
         self.enc = torch.nn.ModuleDict()
         cout = in_channels
         for level, mult in enumerate(channel_mult):
-            res = img_resolution >> level
+            res = img_resolution >> level #NOTE >> is a right bit shift, i.e. img_resolution / 2**level
             if level == 0:
                 cin = cout
                 cout = model_channels * mult
@@ -426,7 +429,7 @@ class DhariwalUNet(torch.nn.Module):
             else:
                 self.dec[f'{res}x{res}_up'] = UNetBlock(in_channels=cout, out_channels=cout, up=True, **block_kwargs)
             for idx in range(num_blocks + 1):
-                cin = cout + skips.pop()
+                cin = cout + skips.pop() #NOTE skip connections are concatenated, not summed
                 cout = model_channels * mult
                 self.dec[f'{res}x{res}_block{idx}'] = UNetBlock(in_channels=cin, out_channels=cout, attention=(res in attn_resolutions), **block_kwargs)
         self.out_norm = GroupNorm(num_channels=cout)
@@ -434,6 +437,10 @@ class DhariwalUNet(torch.nn.Module):
 
     def forward(self, x, noise_labels, class_labels, augment_labels=None):
         # Mapping.
+        #NOTE(1) t_emb = embedding(timestep), aug_emb = linear(onehot(aug))
+        #    (2) t+aug_emb = linear(silu(linear(t_emb + aug_emb)))
+        #    (3) class_emb = linear(onehot(class)) (plus random dropout for classifier-free guidance)
+        #    (4) final_emb = silu(t+aug_emb + class_emb)   
         emb = self.map_noise(noise_labels)
         if self.map_augment is not None and augment_labels is not None:
             emb = emb + self.map_augment(augment_labels)
@@ -447,6 +454,8 @@ class DhariwalUNet(torch.nn.Module):
         emb = silu(emb)
 
         # Encoder.
+        #NOTE embeddings calculated above are projected by linear and then used to scale and shift to intermediate feature maps
+        #   as in Dhariwal and Nichol.
         skips = []
         for block in self.enc.values():
             x = block(x, emb) if isinstance(block, UNetBlock) else block(x)

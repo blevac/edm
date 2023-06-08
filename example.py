@@ -69,6 +69,7 @@ def generate_image_grid(
             x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
 
     # Save image grid.
+    #TODO this uses normalisation for png - change
     print(f'Saving image grid to "{dest_path}"...')
     image = (x_next * 127.5 + 128).clip(0, 255).to(torch.uint8)
     image = image.reshape(gridh, gridw, *image.shape[1:]).permute(0, 3, 1, 4, 2)
