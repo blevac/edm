@@ -1,0 +1,1 @@
+{"project_name": "travis_edm_training", "storage_account_name": "brettwest", "container_name": "amulet", "blob_storage_account_name": "brettwest", "registry_name": "projects", "local_path": "/home/t-brettlevac/edm", "default_output_dir": "/home/t-brettlevac/edm/amlt", "project_uuid": "7313360686.44024-18f39bcc-e1c3-403b-aaec-fcd8e57c2aec", "version": "9.16.1"}
