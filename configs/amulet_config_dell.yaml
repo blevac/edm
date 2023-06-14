@@ -1,0 +1,62 @@
+description: "running EDM training on cluster"
+
+
+env_defaults:
+  NODES: 1
+  GPUS: 4
+  GPUTYPE: V100
+  GPUMEM: 32
+  BATCH_SIZE: 16
+  
+  REGION: $AMLT_REGION_NAME
+  MOUNT_DIR: /data/edm_training_data #name on cluster (same as local)
+  # Data mount cache size should be (300GB * num_gpus)/num_mounts
+  DATA_MOUNT_CACHE_SIZE: 300GB
+
+#specify mount locations for training data
+storage:
+  external:
+    storage_account_name: $AMLT_DATA_STORAGE_ACCOUNT_NAME
+    container_name: edm-training-cluster
+    mount_dir: ${MOUNT_DIR}
+  
+target:
+  service: amlk8s
+  name: itphcrdellcl1
+  vc: hcrdell1
+
+# specify the saved image to use for training
+environment:
+  # make sure you have actaully saved this image to the dev container registry
+  # nvcr.io/nvidia/pytorch:22.10-py3
+  image: pytorch:22.10-py3
+  registry: nvcr.io/nvidia
+  setup:
+    - pip install azureml-defaults
+    - pip install imageio imageio-ffmpeg==0.4.4 pyspng==0.1.0
+    # - conda env create -f environment.yml -n edm
+    # - conda activate edm
+
+code:
+  local_dir: . #from the directory where you are running this config command
+
+data:
+  storage_id: external
+  remote_dir: fastmri_all_preprocessed #make sure data folder in container exists
+
+jobs:
+- name: edm_training_unconditional
+  sku: ${NODES}x${GPUMEM}G${GPUS}-${GPUTYPE}-IB #-NvLink@${REGION}
+  process_count_per_node: 1 #${GPUS}
+  mpi: False
+  preemptible: False
+  priority: Medium
+  submit_args:
+    env:
+      DATASET_MOUNT_CACHE_SIZE: ${DATA_MOUNT_CACHE_SIZE}
+      # AMLT_DOCKERFILE_TEMPLATE: DEFAULT
+  command:
+  - mkdir -p $${AMLT_OUTPUT_DIR} #create an output directory
+  - torchrun --standalone --nproc_per_node=${GPUS} train.py --cache False --bench False --outdir $$AMLT_OUTPUT_DIR --data=/data/edm_training_data/fastmri_all_preprocessed --cond 0 --arch ddpmpp --duration 10 --batch ${BATCH_SIZE} --cbase=128 --cres=1,1,2,2,2,2,2 --lr 1e-4 --ema=0.1 --dropout=0.0 --desc=container_test --tick=1 --dump=100 --seed=2023 --precond edm
+
+
